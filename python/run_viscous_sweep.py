@@ -47,7 +47,16 @@ def _patch_gauss_for_python_solver():
         for i in range(1, nn + 1):
             r[i] = rmat[i][1]
 
+    # Patch the imported module binding used in this file.
     xbl_mod.gauss = gauss1
+
+    # Also patch any already-imported module aliases so mrchue()/viscal()
+    # always see the adapted gauss wrapper even if xbl was imported under a
+    # different module name in this interpreter session.
+    for module_name in ("python.xbl", "xbl"):
+        module = sys.modules.get(module_name)
+        if module is not None:
+            module.gauss = gauss1
 
 
 def build_viscal_context(ides: int, minf: float, reinf: float, alfa_rad: float, waklen: float = 1.0, quiet: bool = True) -> XFoilState:
