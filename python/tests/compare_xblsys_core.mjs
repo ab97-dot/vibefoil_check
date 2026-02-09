@@ -28,6 +28,9 @@ function makeCtx(state) {
   for (const [key, val] of Object.entries(state)) {
     ctx[key] = cloneValue(val);
   }
+  delete ctx.VS1F;
+  delete ctx.VS2F;
+  ctx._ENSURED = false;
   ensureCtx(ctx);
   syncVarsToCom(ctx, 1);
   syncVarsToCom(ctx, 2);
