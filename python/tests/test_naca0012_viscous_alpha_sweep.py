@@ -32,6 +32,7 @@ class TestNaca0012ViscousAlphaSweep(unittest.TestCase):
         cls = []
         cds = []
         cms = []
+        cdps = []
 
         for alpha_deg in range(0, 11):
             alfa = alpha_deg * math.pi / 180.0
@@ -53,7 +54,14 @@ class TestNaca0012ViscousAlphaSweep(unittest.TestCase):
 
             cls.append(ctx.CL)
             cds.append(ctx.CD)
+            cdps.append(ctx.CD - ctx.CDF)
             cms.append(ctx.CM)
+
+
+        print("\nNACA 0012 viscous sweep (Re=1e6)")
+        print("alpha_deg,CL,CD,CDp,Cm")
+        for alpha_deg, cl, cd, cdp, cm in zip(range(0, 11), cls, cds, cdps, cms):
+            print(f"{alpha_deg},{cl:.6f},{cd:.6f},{cdp:.6f},{cm:.6f}")
 
         self.assertLess(abs(cls[0]), 0.2, "CL at 0 deg should be near zero for NACA 0012")
 
