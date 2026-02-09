@@ -335,6 +335,20 @@ def MIXED(ctx, kqsp, niterq):
         for i in range(1, ctx.N + 6):
             ctx.DQ[i] = dq_mat[i][1]
 
+        max_geom_step = 0.0
+        for i in range(ctx.IQ1, ctx.IQ2 + 1):
+            step = abs(ctx.DQ[i])
+            if step > max_geom_step:
+                max_geom_step = step
+
+        max_step = getattr(ctx, "QDES_MAXSTEP", 0.02)
+        if max_step is None:
+            max_step = 0.02
+        if max_geom_step > max_step and max_geom_step > 0.0:
+            relax = max_step / max_geom_step
+            for i in range(1, ctx.N + 6):
+                ctx.DQ[i] = ctx.DQ[i] * relax
+
         inmax = 0
         igmax = 0
         dnmax = 0.0
