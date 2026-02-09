@@ -3,15 +3,16 @@ import contextlib
 import io
 import math
 import pathlib
+import re
 import sys
-from typing import List
+from typing import List, Optional, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 import python.xbl as xbl_mod
 from python.xbl import XFoilState, XBlState, blpini
-from python.xfoil import comset, naca
+from python.xfoil import comset, naca, pangen
 from python.xpanel import ggcalc
 from python.xoper import viscal
 from python.xsolve import gauss as gauss_base
@@ -22,6 +23,7 @@ from python.xsolve import gauss as gauss_base
 #   python python/run_viscous_sweep.py
 # -----------------------------------------------------------------------------
 NACA_CODE = "0012"          # 4- or 5-digit NACA code string, e.g. "0012" or "23012"
+AIRFOIL_DAT_PATH = ""       # Optional path to a Selig-format .dat file. If set, NACA_CODE is ignored.
 REYNOLDS = 1.0e6            # Reynolds number
 MACH = 0.0                  # Mach number (MINF)
 WAKLEN = 1.0                # Wake length parameter
@@ -35,7 +37,6 @@ ALPHAS_DEG_LIST: List[float] = []  # e.g. [0, 2, 4, 6, 8, 10]
 ALPHA_START_DEG = 0.0
 ALPHA_END_DEG = 10.0
 ALPHA_STEP_DEG = 1.0
-
 
 
 def _patch_gauss_for_python_solver():
@@ -59,7 +60,74 @@ def _patch_gauss_for_python_solver():
             module.gauss = gauss1
 
 
-def build_viscal_context(ides: int, minf: float, reinf: float, alfa_rad: float, waklen: float = 1.0, quiet: bool = True) -> XFoilState:
+def parse_selig_dat(dat_path: pathlib.Path) -> Tuple[str, List[Tuple[float, float]]]:
+    lines = dat_path.read_text(encoding="utf-8").splitlines()
+
+    name = dat_path.stem
+    coords: List[Tuple[float, float]] = []
+    seen_coords = False
+
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+
+        fields = [part for part in re.split(r"[\s,]+", line) if part]
+        if len(fields) < 2:
+            if not seen_coords:
+                name = line
+            continue
+
+        try:
+            x = float(fields[0])
+            y = float(fields[1])
+        except ValueError:
+            if not seen_coords:
+                name = line
+            continue
+
+        coords.append((x, y))
+        seen_coords = True
+
+    if len(coords) < 3:
+        raise ValueError(f"Selig .dat file must contain at least 3 coordinate pairs: {dat_path}")
+
+    return name, coords
+
+
+def load_airfoil_dat(ctx: XFoilState, dat_path: pathlib.Path):
+    name, coords = parse_selig_dat(dat_path)
+
+    if len(coords) >= len(ctx.XB):
+        raise ValueError(
+            f"Too many points in {dat_path} ({len(coords)}); maximum supported is {len(ctx.XB) - 1}."
+        )
+
+    ctx.NB = len(coords)
+    ctx.NAME = name
+    ctx.NNAME = len(name)
+
+    for idx, (x, y) in enumerate(coords, start=1):
+        ctx.XB[idx] = x
+        ctx.YB[idx] = y
+
+    ctx.LCLOCK = False
+    ctx.XBF = 0.0
+    ctx.YBF = 0.0
+    ctx.LBFLAP = False
+
+    pangen(ctx, True)
+
+
+def build_viscal_context(
+    ides: Optional[int],
+    minf: float,
+    reinf: float,
+    alfa_rad: float,
+    waklen: float = 1.0,
+    quiet: bool = True,
+    airfoil_dat_path: Optional[pathlib.Path] = None,
+) -> XFoilState:
     ctx = XFoilState()
     ctx.NPAN = 160
     ctx.CVPAR = 1.0
@@ -91,11 +159,21 @@ def build_viscal_context(ides: int, minf: float, reinf: float, alfa_rad: float, 
 
     if quiet:
         with contextlib.redirect_stdout(io.StringIO()):
-            naca(ctx, ides)
+            if airfoil_dat_path is not None:
+                load_airfoil_dat(ctx, airfoil_dat_path)
+            else:
+                if ides is None:
+                    raise ValueError("ides must be provided when AIRFOIL_DAT_PATH is not set")
+                naca(ctx, ides)
             comset(ctx)
             ggcalc(ctx)
     else:
-        naca(ctx, ides)
+        if airfoil_dat_path is not None:
+            load_airfoil_dat(ctx, airfoil_dat_path)
+        else:
+            if ides is None:
+                raise ValueError("ides must be provided when AIRFOIL_DAT_PATH is not set")
+            naca(ctx, ides)
         comset(ctx)
         ggcalc(ctx)
 
@@ -126,13 +204,22 @@ def alphas_from_config() -> List[float]:
 def main():
     _patch_gauss_for_python_solver()
 
-    naca_code = parse_naca(NACA_CODE)
+    airfoil_dat_path = pathlib.Path(AIRFOIL_DAT_PATH).expanduser() if AIRFOIL_DAT_PATH else None
+    naca_code = None if airfoil_dat_path is not None else parse_naca(NACA_CODE)
     alphas_deg = alphas_from_config()
 
     print("alpha_deg,CL,CD,CDp,Cm")
     for alpha_deg in alphas_deg:
         alfa = alpha_deg * math.pi / 180.0
-        ctx = build_viscal_context(naca_code, MACH, REYNOLDS, alfa, WAKLEN, quiet=not VERBOSE)
+        ctx = build_viscal_context(
+            naca_code,
+            MACH,
+            REYNOLDS,
+            alfa,
+            WAKLEN,
+            quiet=not VERBOSE,
+            airfoil_dat_path=airfoil_dat_path,
+        )
 
         cosa = math.cos(ctx.ALFA)
         sina = math.sin(ctx.ALFA)
