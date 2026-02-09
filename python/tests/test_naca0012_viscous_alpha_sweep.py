@@ -59,7 +59,7 @@ class TestNaca0012ViscousAlphaSweep(unittest.TestCase):
 
 
         print("\nNACA 0012 viscous sweep (Re=1e6)")
-        print("alpha_deg,CL,CD,CDp,Cm")
+        print("alpha_deg,CL,CD,CDp,CM")
         for alpha_deg, cl, cd, cdp, cm in zip(range(0, 11), cls, cds, cdps, cms):
             print(f"{alpha_deg},{cl:.6f},{cd:.6f},{cdp:.6f},{cm:.6f}")
 

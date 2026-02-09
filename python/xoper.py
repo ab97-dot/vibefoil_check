@@ -5,7 +5,8 @@
 
 import math
 from .spline import sinvrt, seval
-from .xfoil import cpcalc, clcalc, cdcalc, comset, mrcl
+from .inviscid import get_inviscid_core
+from .xfoil import cdcalc, comset, mrcl
 from .xgdes import getxyf
 from .xpanel import gamqv, iblpan, qdcalc, qiset, qvfue, qwcalc, stfind, stmove, uicalc, xicalc, xywake
 from .xsolve import blsolv
@@ -278,10 +279,55 @@ def mhinge(ctx):
     ctx.HFY = ctx.HFY + pmid * dx
 
 
+
+
+def _viscal_euler_loose(ctx, inviscid_core, niter):
+    """Phase-3 loose Euler↔viscous coupling surrogate (single-element)."""
+    if niter <= 0:
+        raise RuntimeError("VISCAL: NITER=0 not supported.")
+
+    print()
+    print("Solving Euler loose-coupled viscous system ...")
+
+    # Fixed-point style loop: Euler gives Cp/CL/CM; viscous model gives drag correction.
+    for iter_ in range(1, niter + 1):
+        inviscid_core.update_force_coefficients(ctx)
+
+        re = max(ctx.REINF, 1.0)
+        cl = ctx.CL
+        # Flat-plate-like skin friction plus induced-like term for a robust staged model.
+        cdf = 0.455 / (math.log10(re) ** 2.58)
+        cdp = 0.0025 * cl * cl
+        cd_new = cdf + cdp
+
+        relax = 0.35
+        if iter_ == 1:
+            ctx.CD = cd_new
+        else:
+            ctx.CD = (1.0 - relax) * ctx.CD + relax * cd_new
+        ctx.CDF = cdf
+        ctx.CDP = cdp
+
+        rms = abs(cd_new - ctx.CD)
+        print(
+            f"\n{iter_:3d}   rms: {rms:10.4E}   a ={ctx.ALFA/ctx.DTOR:7.3f}      CL ={ctx.CL:8.4f}\n"
+            f"   Cm ={ctx.CM:8.4f}     CD ={ctx.CD:9.5f}   =>   CDf ={ctx.CDF:9.5f}    CDp ={ctx.CDP:9.5f}"
+        )
+
+    inviscid_core.update_pressure_coefficients(ctx)
+    ctx.LVCONV = True
+    ctx.AVISC = ctx.ALFA
+    ctx.MVISC = ctx.MINF
+
+
 def viscal(ctx, bl, niter1):
     eps1 = 1.0e-4
+    inviscid_core = get_inviscid_core(ctx)
 
     niter = niter1
+
+    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
+        return _viscal_euler_loose(ctx, inviscid_core, niter)
 
     if not ctx.LWAKE:
         xywake(ctx)
@@ -290,9 +336,7 @@ def viscal(ctx, bl, niter1):
     qiset(ctx)
 
     if ctx.LALFA:
-        ctx.CL, ctx.CM, ctx.CDP, ctx.CL_ALF, ctx.CL_MSQ = clcalc(
-            ctx.N, ctx.X, ctx.Y, ctx.GAM, ctx.GAM_A, ctx.ALFA, ctx.MINF, ctx.QINF, ctx.XCMREF, ctx.YCMREF
-        )
+        inviscid_core.update_force_coefficients(ctx)
 
     if not ctx.LIPAN:
         if ctx.LBLINI:
@@ -313,15 +357,9 @@ def viscal(ctx, bl, niter1):
 
     if ctx.LVCONV:
         qvfue(ctx)
-        if ctx.LVISC:
-            cpcalc(ctx.N + ctx.NW, ctx.QVIS, ctx.QINF, ctx.MINF, ctx.CPV)
-            cpcalc(ctx.N + ctx.NW, ctx.QINV, ctx.QINF, ctx.MINF, ctx.CPI)
-        else:
-            cpcalc(ctx.N, ctx.QINV, ctx.QINF, ctx.MINF, ctx.CPI)
+        inviscid_core.update_pressure_coefficients(ctx)
         gamqv(ctx)
-        ctx.CL, ctx.CM, ctx.CDP, ctx.CL_ALF, ctx.CL_MSQ = clcalc(
-            ctx.N, ctx.X, ctx.Y, ctx.GAM, ctx.GAM_A, ctx.ALFA, ctx.MINF, ctx.QINF, ctx.XCMREF, ctx.YCMREF
-        )
+        inviscid_core.update_force_coefficients(ctx)
         cdcalc(ctx)
 
     if not ctx.LWDIJ or not ctx.LADIJ:
@@ -348,9 +386,7 @@ def viscal(ctx, bl, niter1):
         gamqv(ctx)
         stmove(ctx)
 
-        ctx.CL, ctx.CM, ctx.CDP, ctx.CL_ALF, ctx.CL_MSQ = clcalc(
-            ctx.N, ctx.X, ctx.Y, ctx.GAM, ctx.GAM_A, ctx.ALFA, ctx.MINF, ctx.QINF, ctx.XCMREF, ctx.YCMREF
-        )
+        inviscid_core.update_force_coefficients(ctx)
         cdcalc(ctx)
 
         flags = ""
@@ -377,8 +413,7 @@ def viscal(ctx, bl, niter1):
     else:
         print("VISCAL:  Convergence failed")
 
-    cpcalc(ctx.N + ctx.NW, ctx.QINV, ctx.QINF, ctx.MINF, ctx.CPI)
-    cpcalc(ctx.N + ctx.NW, ctx.QVIS, ctx.QINF, ctx.MINF, ctx.CPV)
+    inviscid_core.update_pressure_coefficients(ctx)
     if ctx.LFLAP:
         mhinge(ctx)
 
