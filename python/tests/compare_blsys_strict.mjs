@@ -19,6 +19,9 @@ ensureCtx(ctx);
 for (const [key, val] of Object.entries(base)) {
   ctx[key] = cloneValue(val);
 }
+delete ctx.VS1F;
+delete ctx.VS2F;
+ctx._ENSURED = false;
 ensureCtx(ctx);
 syncVarsToCom(ctx, 1);
 syncVarsToCom(ctx, 2);
