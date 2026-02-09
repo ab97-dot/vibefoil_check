@@ -279,12 +279,33 @@ def mhinge(ctx):
     ctx.HFY = ctx.HFY + pmid * dx
 
 
+def _compute_bl_coupling_from_dstar(ctx):
+    if not ctx.LBLINI:
+        return 0.0
+
+    dstar_sum = 0.0
+    count = 0
+    for is_ in (1, 2):
+        iblte = ctx.IBLTE[is_]
+        if iblte <= 1:
+            continue
+        for ibl in range(2, iblte + 1):
+            dstar = ctx.DSTR[ibl][is_]
+            if dstar > 0.0:
+                dstar_sum += dstar
+                count += 1
+
+    if count == 0:
+        return 0.0
+
+    chord = abs(ctx.CHORD) if abs(ctx.CHORD) > 1.0e-8 else 1.0
+    return min(0.2, dstar_sum / (count * chord))
+
+
 def viscal(ctx, bl, niter1):
     eps1 = 1.0e-4
     inviscid_core = get_inviscid_core(ctx)
-
-    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
-        raise NotImplementedError("Euler mode is Phase-1 inviscid only; viscous coupling starts in Phase 3.")
+    is_euler = getattr(inviscid_core, "name", "panel") == "euler"
 
     niter = niter1
 
@@ -316,9 +337,20 @@ def viscal(ctx, bl, niter1):
 
     if ctx.LVCONV:
         qvfue(ctx)
-        inviscid_core.update_pressure_coefficients(ctx)
+        coupling = _compute_bl_coupling_from_dstar(ctx)
+        if is_euler:
+            inviscid_core.update_pressure_coefficients(
+                ctx,
+                bl_coupling=coupling,
+                relax=getattr(ctx, "BL_PRESSURE_RELAX", 0.25),
+            )
+        else:
+            inviscid_core.update_pressure_coefficients(ctx)
         gamqv(ctx)
-        inviscid_core.update_force_coefficients(ctx)
+        if is_euler:
+            inviscid_core.update_force_coefficients(ctx, recompute_pressure=False)
+        else:
+            inviscid_core.update_force_coefficients(ctx)
         cdcalc(ctx)
 
     if not ctx.LWDIJ or not ctx.LADIJ:
@@ -329,6 +361,9 @@ def viscal(ctx, bl, niter1):
 
     print()
     print("Solving BL system ...")
+    ctx.FP_DELCL = []
+    ctx.FP_DELCM = []
+    ctx.FP_DELCD = []
     for iter_ in range(1, niter + 1):
         setbl(ctx, bl)
         blsolv(ctx)
@@ -342,11 +377,30 @@ def viscal(ctx, bl, niter1):
             uicalc(ctx)
 
         qvfue(ctx)
+        coupling = _compute_bl_coupling_from_dstar(ctx)
+        ctx.BL_COUPLING = coupling
+        if is_euler:
+            inviscid_core.update_pressure_coefficients(
+                ctx,
+                bl_coupling=coupling,
+                relax=getattr(ctx, "BL_PRESSURE_RELAX", 0.25),
+            )
+        else:
+            inviscid_core.update_pressure_coefficients(ctx)
         gamqv(ctx)
         stmove(ctx)
 
-        inviscid_core.update_force_coefficients(ctx)
+        cl_prev = ctx.CL
+        cm_prev = ctx.CM
+        cd_prev = ctx.CD
+        if is_euler:
+            inviscid_core.update_force_coefficients(ctx, recompute_pressure=False)
+        else:
+            inviscid_core.update_force_coefficients(ctx)
         cdcalc(ctx)
+        ctx.FP_DELCL.append(ctx.CL - cl_prev)
+        ctx.FP_DELCM.append(ctx.CM - cm_prev)
+        ctx.FP_DELCD.append(ctx.CD - cd_prev)
 
         flags = ""
 
@@ -372,7 +426,14 @@ def viscal(ctx, bl, niter1):
     else:
         print("VISCAL:  Convergence failed")
 
-    inviscid_core.update_pressure_coefficients(ctx)
+    if is_euler:
+        inviscid_core.update_pressure_coefficients(
+            ctx,
+            bl_coupling=getattr(ctx, "BL_COUPLING", 0.0),
+            relax=getattr(ctx, "BL_PRESSURE_RELAX", 0.25),
+        )
+    else:
+        inviscid_core.update_pressure_coefficients(ctx)
     if ctx.LFLAP:
         mhinge(ctx)
 
