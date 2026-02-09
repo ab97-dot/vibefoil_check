@@ -284,7 +284,7 @@ def viscal(ctx, bl, niter1):
     inviscid_core = get_inviscid_core(ctx)
 
     if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
-        raise NotImplementedError("Euler mode is Phase-1 inviscid only; viscous coupling starts in Phase 3.")
+        return _viscal_euler_loose(ctx, bl, niter1, inviscid_core, eps1)
 
     niter = niter1
 
@@ -420,3 +420,98 @@ def viscal(ctx, bl, niter1):
             lu.write(
                 f" {ctx.XSSI[ibl][is_]:11.4f}{ctx.UEDG[ibl][is_]:11.4f}{hk:11.4f}{pdef:11.6f}{edef:11.6f}{ctx.X[i]:11.3f}{dpds:14.6e}\n"
             )
+
+
+def _viscal_euler_loose(ctx, bl, niter1, inviscid_core, eps1):
+    niter = niter1
+
+    if not ctx.LWAKE:
+        xywake(ctx)
+
+    qwcalc(ctx)
+    qiset(ctx)
+
+    # Refresh Euler inviscid state at current geometry/alpha.
+    inviscid_core.update_pressure_coefficients(ctx)
+
+    if not ctx.LIPAN:
+        if ctx.LBLINI:
+            gamqv(ctx)
+
+        stfind(ctx)
+        iblpan(ctx)
+        xicalc(ctx)
+        iblsys(ctx)
+
+    uicalc(ctx)
+
+    if not ctx.LBLINI:
+        for ibl in range(1, ctx.NBL[1] + 1):
+            ctx.UEDG[ibl][1] = ctx.UINV[ibl][1]
+        for ibl in range(1, ctx.NBL[2] + 1):
+            ctx.UEDG[ibl][2] = ctx.UINV[ibl][2]
+
+    if ctx.LVCONV:
+        qvfue(ctx)
+        gamqv(ctx)
+        inviscid_core.update_force_coefficients(ctx)
+        cdcalc(ctx)
+
+    if not ctx.LWDIJ or not ctx.LADIJ:
+        qdcalc(ctx)
+
+    if niter == 0:
+        raise RuntimeError("VISCAL: NITER=0 not supported.")
+
+    print()
+    print("Solving BL system ...")
+    for iter_ in range(1, niter + 1):
+        setbl(ctx, bl)
+        blsolv(ctx)
+        update(ctx, bl)
+
+        inviscid_core.update_pressure_coefficients(ctx)
+        uicalc(ctx)
+
+        exch_rlx = min(1.0, max(0.05, getattr(ctx, "EULER_BL_RLX", 0.35)))
+        for is_ in range(1, 3):
+            for ibl in range(2, ctx.NBL[is_] + 1):
+                uold = ctx.UEDG[ibl][is_]
+                ctx.UEDG[ibl][is_] = uold + exch_rlx * (ctx.UINV[ibl][is_] - uold)
+
+        qvfue(ctx)
+        gamqv(ctx)
+        stmove(ctx)
+
+        inviscid_core.update_force_coefficients(ctx)
+        cdcalc(ctx)
+
+        flags = ""
+
+        if ctx.RLX < 1.0:
+            print(
+                f"\n{iter_:3d}   rms: {ctx.RMSBL:10.4E}   max: {ctx.RMXBL:10.4E}   {ctx.VMXBL} at {ctx.IMXBL:4d}{ctx.ISMXBL:3d}   RLX:{ctx.RLX:6.3f}{flags}"
+            )
+        if ctx.RLX == 1.0:
+            print(
+                f"\n{iter_:3d}   rms: {ctx.RMSBL:10.4E}   max: {ctx.RMXBL:10.4E}   {ctx.VMXBL} at {ctx.IMXBL:4d}{ctx.ISMXBL:3d}{flags}"
+            )
+        cdpdif = ctx.CD - ctx.CDF
+        print(
+            f"    a ={ctx.ALFA/ctx.DTOR:7.3f}      CL ={ctx.CL:8.4f}\n"
+            f"   Cm ={ctx.CM:8.4f}     CD ={ctx.CD:9.5f}   =>   CDf ={ctx.CDF:9.5f}    CDp ={cdpdif:9.5f}"
+        )
+
+        if ctx.RMSBL < eps1:
+            ctx.LVCONV = True
+            ctx.AVISC = ctx.ALFA
+            ctx.MVISC = ctx.MINF
+            break
+    else:
+        print("VISCAL:  Convergence failed")
+
+    inviscid_core.update_pressure_coefficients(ctx)
+    if ctx.LFLAP:
+        mhinge(ctx)
+
+    return None
