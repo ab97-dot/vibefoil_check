@@ -9,7 +9,7 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT))
 
-from python.run_viscous_sweep import build_viscal_context, parse_selig_dat
+from python.run_viscous_sweep import build_viscal_context, enforce_blunt_te, parse_selig_dat
 from python.xbl import XFoilState
 from python.xfoil import naca
 
@@ -25,6 +25,11 @@ class TestRunViscousSweepDat(unittest.TestCase):
             self.assertEqual(name, "Sample Airfoil")
             self.assertEqual(len(coords), 3)
             self.assertEqual(coords[1], (0.0, 0.1))
+
+    def test_enforce_blunt_te(self):
+        coords = [(1.0, 0.10), (0.0, 0.0), (1.0, -0.05)]
+        out = enforce_blunt_te(coords, 0.02)
+        self.assertAlmostEqual(out[0][1] - out[-1][1], 0.02, places=12)
 
     def test_build_viscal_context_from_dat(self):
         source = XFoilState()
@@ -49,8 +54,11 @@ class TestRunViscousSweepDat(unittest.TestCase):
                 airfoil_dat_path=dat_path,
             )
 
-            self.assertGreater(ctx.N, 0)
+            self.assertEqual(ctx.N, 160)
             self.assertEqual(ctx.NAME, "NACA0012 via DAT")
+            chord = max(source.XB[1:source.NB + 1]) - min(source.XB[1:source.NB + 1])
+            target = 0.002 * chord
+            self.assertAlmostEqual(ctx.YB[1] - ctx.YB[ctx.NB], target, places=7)
 
 
 if __name__ == "__main__":

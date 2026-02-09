@@ -24,6 +24,7 @@ from python.xsolve import gauss as gauss_base
 # -----------------------------------------------------------------------------
 NACA_CODE = "0012"          # 4- or 5-digit NACA code string, e.g. "0012" or "23012"
 AIRFOIL_DAT_PATH = ""       # Optional path to a Selig-format .dat file. If set, NACA_CODE is ignored.
+TE_THICKNESS_FRAC = 0.002   # Trailing-edge thickness fraction of chord for DAT airfoils (blunt TE target).
 REYNOLDS = 1.0e6            # Reynolds number
 MACH = 0.0                  # Mach number (MINF)
 WAKLEN = 1.0                # Wake length parameter
@@ -95,8 +96,34 @@ def parse_selig_dat(dat_path: pathlib.Path) -> Tuple[str, List[Tuple[float, floa
     return name, coords
 
 
-def load_airfoil_dat(ctx: XFoilState, dat_path: pathlib.Path):
+
+
+def enforce_blunt_te(coords: List[Tuple[float, float]], te_thickness_frac: float) -> List[Tuple[float, float]]:
+    if te_thickness_frac < 0.0:
+        raise ValueError("TE_THICKNESS_FRAC must be >= 0")
+
+    xs = [xy[0] for xy in coords]
+    chord = max(xs) - min(xs)
+    if chord <= 0.0:
+        raise ValueError("Invalid DAT geometry: chord length must be positive")
+
+    target_gap = te_thickness_frac * chord
+
+    x_u, y_u = coords[0]
+    x_l, y_l = coords[-1]
+    y_mid = 0.5 * (y_u + y_l)
+
+    sign = 1.0 if (y_u - y_l) >= 0.0 else -1.0
+    half_gap = 0.5 * target_gap
+
+    new_coords = list(coords)
+    new_coords[0] = (x_u, y_mid + sign * half_gap)
+    new_coords[-1] = (x_l, y_mid - sign * half_gap)
+    return new_coords
+
+def load_airfoil_dat(ctx: XFoilState, dat_path: pathlib.Path, te_thickness_frac: float):
     name, coords = parse_selig_dat(dat_path)
+    coords = enforce_blunt_te(coords, te_thickness_frac)
 
     if len(coords) >= len(ctx.XB):
         raise ValueError(
@@ -160,7 +187,7 @@ def build_viscal_context(
     if quiet:
         with contextlib.redirect_stdout(io.StringIO()):
             if airfoil_dat_path is not None:
-                load_airfoil_dat(ctx, airfoil_dat_path)
+                load_airfoil_dat(ctx, airfoil_dat_path, TE_THICKNESS_FRAC)
             else:
                 if ides is None:
                     raise ValueError("ides must be provided when AIRFOIL_DAT_PATH is not set")
@@ -169,7 +196,7 @@ def build_viscal_context(
             ggcalc(ctx)
     else:
         if airfoil_dat_path is not None:
-            load_airfoil_dat(ctx, airfoil_dat_path)
+            load_airfoil_dat(ctx, airfoil_dat_path, TE_THICKNESS_FRAC)
         else:
             if ides is None:
                 raise ValueError("ides must be provided when AIRFOIL_DAT_PATH is not set")
