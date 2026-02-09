@@ -62,6 +62,10 @@ class TestPhase1EulerBaselineCompare(unittest.TestCase):
             # Euler viscous (Phase 3 loose coupling)
             ctx_ev = build_viscal_context(12, minf=minf, reinf=reinf, alfa_rad=alfa, quiet=True)
             ctx_ev.INVISCID_MODEL = "euler"
+            cosa_ev = math.cos(ctx_ev.ALFA)
+            sina_ev = math.sin(ctx_ev.ALFA)
+            for i in range(1, ctx_ev.N + 1):
+                ctx_ev.GAM[i] = cosa_ev * ctx_ev.GAMU[i][1] + sina_ev * ctx_ev.GAMU[i][2]
             bl_ev = XBlState()
             blpini(bl_ev)
             with contextlib.redirect_stdout(io.StringIO()):

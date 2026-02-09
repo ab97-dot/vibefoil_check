@@ -281,53 +281,48 @@ def mhinge(ctx):
 
 
 
-def _viscal_euler_loose(ctx, inviscid_core, niter):
-    """Phase-3 loose Euler↔viscous coupling surrogate (single-element)."""
-    if niter <= 0:
-        raise RuntimeError("VISCAL: NITER=0 not supported.")
 
-    print()
-    print("Solving Euler loose-coupled viscous system ...")
 
-    # Fixed-point style loop: Euler gives Cp/CL/CM; viscous model gives drag correction.
-    for iter_ in range(1, niter + 1):
-        inviscid_core.update_force_coefficients(ctx)
+def _viscal_euler_via_panel_bl(ctx, bl, niter1):
+    """Phase-3 staging: run BL stack in panel mode, then apply relaxed Euler force correction."""
+    saved_model = ctx.INVISCID_MODEL
 
-        re = max(ctx.REINF, 1.0)
-        cl = ctx.CL
-        # Flat-plate-like skin friction plus induced-like term for a robust staged model.
-        cdf = 0.455 / (math.log10(re) ** 2.58)
-        cdp = 0.0025 * cl * cl
-        cd_new = cdf + cdp
+    # Run the full BL iteration stack so viscous quantities come from the same solver machinery.
+    ctx.INVISCID_MODEL = "panel"
+    viscal(ctx, bl, niter1)
 
-        relax = 0.35
-        if iter_ == 1:
-            ctx.CD = cd_new
-        else:
-            ctx.CD = (1.0 - relax) * ctx.CD + relax * cd_new
-        ctx.CDF = cdf
-        ctx.CDP = cdp
+    panel_cl = ctx.CL
+    panel_cm = ctx.CM
+    panel_cd = ctx.CD
+    panel_cdf = ctx.CDF
+    panel_cdp = ctx.CDP
 
-        rms = abs(cd_new - ctx.CD)
-        print(
-            f"\n{iter_:3d}   rms: {rms:10.4E}   a ={ctx.ALFA/ctx.DTOR:7.3f}      CL ={ctx.CL:8.4f}\n"
-            f"   Cm ={ctx.CM:8.4f}     CD ={ctx.CD:9.5f}   =>   CDf ={ctx.CDF:9.5f}    CDp ={ctx.CDP:9.5f}"
-        )
+    # Euler correction on forces only (loose coupling stage).
+    ctx.INVISCID_MODEL = "euler"
+    euler_core = get_inviscid_core(ctx)
+    euler_core.update_force_coefficients(ctx)
 
-    inviscid_core.update_pressure_coefficients(ctx)
-    ctx.LVCONV = True
-    ctx.AVISC = ctx.ALFA
-    ctx.MVISC = ctx.MINF
+    force_relax = 0.2
+    ctx.CL = (1.0 - force_relax) * panel_cl + force_relax * ctx.CL
+    ctx.CM = (1.0 - force_relax) * panel_cm + force_relax * ctx.CM
+
+    # Keep viscous drag from BL stack.
+    ctx.CD = panel_cd
+    ctx.CDF = panel_cdf
+    ctx.CDP = panel_cdp
+    ctx.INVISCID_MODEL = saved_model
 
 
 def viscal(ctx, bl, niter1):
     eps1 = 1.0e-4
+
+    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
+        return _viscal_euler_via_panel_bl(ctx, bl, niter1)
+
     inviscid_core = get_inviscid_core(ctx)
 
     niter = niter1
 
-    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
-        return _viscal_euler_loose(ctx, inviscid_core, niter)
 
     if not ctx.LWAKE:
         xywake(ctx)
