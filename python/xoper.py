@@ -5,7 +5,8 @@
 
 import math
 from .spline import sinvrt, seval
-from .xfoil import cpcalc, clcalc, cdcalc, comset, mrcl
+from .inviscid import get_inviscid_core
+from .xfoil import cdcalc, comset, mrcl
 from .xgdes import getxyf
 from .xpanel import gamqv, iblpan, qdcalc, qiset, qvfue, qwcalc, stfind, stmove, uicalc, xicalc, xywake
 from .xsolve import blsolv
@@ -280,6 +281,10 @@ def mhinge(ctx):
 
 def viscal(ctx, bl, niter1):
     eps1 = 1.0e-4
+    inviscid_core = get_inviscid_core(ctx)
+
+    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
+        raise NotImplementedError("Euler mode is Phase-1 inviscid only; viscous coupling starts in Phase 3.")
 
     niter = niter1
 
@@ -290,9 +295,7 @@ def viscal(ctx, bl, niter1):
     qiset(ctx)
 
     if ctx.LALFA:
-        ctx.CL, ctx.CM, ctx.CDP, ctx.CL_ALF, ctx.CL_MSQ = clcalc(
-            ctx.N, ctx.X, ctx.Y, ctx.GAM, ctx.GAM_A, ctx.ALFA, ctx.MINF, ctx.QINF, ctx.XCMREF, ctx.YCMREF
-        )
+        inviscid_core.update_force_coefficients(ctx)
 
     if not ctx.LIPAN:
         if ctx.LBLINI:
@@ -313,15 +316,9 @@ def viscal(ctx, bl, niter1):
 
     if ctx.LVCONV:
         qvfue(ctx)
-        if ctx.LVISC:
-            cpcalc(ctx.N + ctx.NW, ctx.QVIS, ctx.QINF, ctx.MINF, ctx.CPV)
-            cpcalc(ctx.N + ctx.NW, ctx.QINV, ctx.QINF, ctx.MINF, ctx.CPI)
-        else:
-            cpcalc(ctx.N, ctx.QINV, ctx.QINF, ctx.MINF, ctx.CPI)
+        inviscid_core.update_pressure_coefficients(ctx)
         gamqv(ctx)
-        ctx.CL, ctx.CM, ctx.CDP, ctx.CL_ALF, ctx.CL_MSQ = clcalc(
-            ctx.N, ctx.X, ctx.Y, ctx.GAM, ctx.GAM_A, ctx.ALFA, ctx.MINF, ctx.QINF, ctx.XCMREF, ctx.YCMREF
-        )
+        inviscid_core.update_force_coefficients(ctx)
         cdcalc(ctx)
 
     if not ctx.LWDIJ or not ctx.LADIJ:
@@ -348,9 +345,7 @@ def viscal(ctx, bl, niter1):
         gamqv(ctx)
         stmove(ctx)
 
-        ctx.CL, ctx.CM, ctx.CDP, ctx.CL_ALF, ctx.CL_MSQ = clcalc(
-            ctx.N, ctx.X, ctx.Y, ctx.GAM, ctx.GAM_A, ctx.ALFA, ctx.MINF, ctx.QINF, ctx.XCMREF, ctx.YCMREF
-        )
+        inviscid_core.update_force_coefficients(ctx)
         cdcalc(ctx)
 
         flags = ""
@@ -377,8 +372,7 @@ def viscal(ctx, bl, niter1):
     else:
         print("VISCAL:  Convergence failed")
 
-    cpcalc(ctx.N + ctx.NW, ctx.QINV, ctx.QINF, ctx.MINF, ctx.CPI)
-    cpcalc(ctx.N + ctx.NW, ctx.QVIS, ctx.QINF, ctx.MINF, ctx.CPV)
+    inviscid_core.update_pressure_coefficients(ctx)
     if ctx.LFLAP:
         mhinge(ctx)
 

@@ -11,7 +11,8 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from python.xbl import XFoilState
-from python.xfoil import clcalc, comset, naca, pangen
+from python.inviscid import get_inviscid_core
+from python.xfoil import comset, naca, pangen
 from python.xpanel import ggcalc
 
 # -----------------------------------------------------------------------------
@@ -24,6 +25,7 @@ AIRFOIL_DAT_PATH = ""       # Optional path to a Selig-format .dat file. If set,
 TE_THICKNESS_FRAC = 0.002   # Trailing-edge thickness fraction of chord for DAT airfoils (blunt TE target).
 MACH = 0.0                  # Mach number (MINF)
 VERBOSE = False             # True to print panel setup logs
+INVISCID_MODEL = "panel"     # "panel" or "euler"
 
 # Option A: explicit list of alphas (deg)
 ALPHAS_DEG_LIST: List[float] = []  # e.g. [0, 2, 4, 6, 8, 10]
@@ -144,6 +146,7 @@ def build_inviscid_context(
     ctx.LVISC = False
     ctx.XCMREF = 0.25
     ctx.YCMREF = 0.0
+    ctx.INVISCID_MODEL = INVISCID_MODEL
 
     if quiet:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -191,7 +194,7 @@ def main():
     naca_code = None if airfoil_dat_path is not None else parse_naca(NACA_CODE)
     alphas_deg = alphas_from_config()
 
-    print("alpha_deg,CL,CD,CDp,Cm")
+    print("alpha_deg,CL,CD,CDp,CM")
     for alpha_deg in alphas_deg:
         alfa = alpha_deg * math.pi / 180.0
         ctx = build_inviscid_context(
@@ -207,9 +210,8 @@ def main():
         for i in range(1, ctx.N + 1):
             ctx.GAM[i] = cosa * ctx.GAMU[i][1] + sina * ctx.GAMU[i][2]
 
-        ctx.CL, ctx.CM, cdp, ctx.CL_ALF, ctx.CL_MSQ = clcalc(
-            ctx.N, ctx.X, ctx.Y, ctx.GAM, ctx.GAM_A, ctx.ALFA, ctx.MINF, ctx.QINF, ctx.XCMREF, ctx.YCMREF
-        )
+        get_inviscid_core(ctx).update_force_coefficients(ctx)
+        cdp = ctx.CDP
         ctx.CD = 0.0
         ctx.CDF = 0.0
 
