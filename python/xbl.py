@@ -66,6 +66,12 @@ class XFoilState:
         self.QSTAR = 0.0
         self.IDAMP = 0
 
+        self.BL_COUPLING = 0.0
+        self.BL_PRESSURE_RELAX = 0.25
+        self.FP_DELCL = []
+        self.FP_DELCM = []
+        self.FP_DELCD = []
+
         self.SLE = 0.0
         self.XLE = 0.0
         self.YLE = 0.0
