@@ -38,6 +38,8 @@ class XFoilState:
         self.LALFA = False
         self.LBLINI = False
 
+        self.INVISCID_MODEL = "panel"
+
         self.CL = 0.0
         self.CM = 0.0
         self.CD = 0.0
