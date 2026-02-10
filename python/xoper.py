@@ -382,6 +382,11 @@ def viscal(ctx, bl, niter1):
 
     inviscid_core = get_inviscid_core(ctx)
 
+    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
+        return _viscal_euler_via_panel_bl(ctx, bl, niter1)
+
+    inviscid_core = get_inviscid_core(ctx)
+
     niter = niter1
 
 
