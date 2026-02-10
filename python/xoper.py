@@ -372,15 +372,6 @@ def _viscal_euler_via_panel_bl(ctx, bl, niter1):
 
 def viscal(ctx, bl, niter1):
     eps1 = 1.0e-4
-    inviscid_core = get_inviscid_core(ctx)
-
-    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
-        raise NotImplementedError("Euler mode is Phase-1 inviscid only; viscous coupling starts in Phase 3.")
-
-    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
-        return _viscal_euler_via_panel_bl(ctx, bl, niter1)
-
-    inviscid_core = get_inviscid_core(ctx)
 
     if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
         return _viscal_euler_via_panel_bl(ctx, bl, niter1)
