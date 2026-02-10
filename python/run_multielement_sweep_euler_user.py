@@ -48,16 +48,9 @@ COUPLED_MAX_ITERS = 12
 COUPLED_CL_TOL = 5.0e-5
 COUPLED_CM_TOL = 5.0e-5
 
-# assembly reference normalization (input coordinates use chord~1.0 reference)
-ASSEMBLY_REF_CHORD = 1.0
-
 # viscous-drag coupling correction: add induced/profile drag due to load transfer
-COUPLED_DRAG_CL_GAIN = 0.014
-COUPLED_DRAG_CM_GAIN = 0.004
-
-# enforce near-constant total CM across alpha (recommended for this baseline)
-ENFORCE_TOTAL_CM_CONSTANCY = True
-TOTAL_CM_TARGET = -0.1305
+COUPLED_DRAG_CL_GAIN = 0.002
+COUPLED_DRAG_CM_GAIN = 0.0005
 
 # Option A: explicit list of alphas (deg)
 ALPHAS_DEG_LIST: List[float] = [4.0, 8.0]
@@ -110,39 +103,6 @@ def _run_element(alpha_deg: float, dat_path: pathlib.Path):
 
 
 
-def _element_chord_weights(geom) -> Dict[int, float]:
-    # convert element-local coefficients to assembly reference via c_i / c_ref
-    w = {}
-    c_ref = max(ASSEMBLY_REF_CHORD, 1.0e-8)
-    for elem in geom.elements:
-        xs = [p[0] for p in elem.points]
-        c_i = max(max(xs) - min(xs), 1.0e-8)
-        w[elem.element_id] = c_i / c_ref
-    return w
-
-
-def _apply_total_cm_constancy(rows):
-    if not ENFORCE_TOTAL_CM_CONSTANCY:
-        return rows
-    elem_rows = [r for r in rows if r[0].startswith("element_")]
-    total_idx = next((i for i, r in enumerate(rows) if r[0] == "total"), None)
-    if not elem_rows or total_idx is None:
-        return rows
-
-    cm_current = rows[total_idx][4]
-    dcm = TOTAL_CM_TARGET - cm_current
-    share = dcm / len(elem_rows)
-    new_rows = []
-    for name, cl, cd, cdp, cm in rows:
-        if name.startswith("element_"):
-            new_rows.append((name, cl, cd, cdp, cm + share))
-        elif name == "total":
-            new_rows.append((name, cl, cd, cdp, TOTAL_CM_TARGET))
-        else:
-            new_rows.append((name, cl, cd, cdp, cm))
-    return new_rows
-
-
 def _run_alpha_legacy(alpha_deg: float, element_paths: List[pathlib.Path]):
     rows = []
     total_cl = 0.0
@@ -150,22 +110,17 @@ def _run_alpha_legacy(alpha_deg: float, element_paths: List[pathlib.Path]):
     total_cdp = 0.0
     total_cm = 0.0
 
-    geom = load_multielement_geometry(element_paths)
-    w = _element_chord_weights(geom)
-
     for idx, dat_path in enumerate(element_paths, start=1):
         ctx = _run_element(alpha_deg, dat_path)
         cdp = ctx.CD - ctx.CDF
-        wi = w[idx]
-        rows.append((f"element_{idx}", ctx.CL * wi, ctx.CD * wi, cdp * wi, ctx.CM * wi))
-        total_cl += ctx.CL * wi
-        total_cd += ctx.CD * wi
-        total_cdp += cdp * wi
-        total_cm += ctx.CM * wi
+        rows.append((f"element_{idx}", ctx.CL, ctx.CD, cdp, ctx.CM))
+        total_cl += ctx.CL
+        total_cd += ctx.CD
+        total_cdp += cdp
+        total_cm += ctx.CM
 
     rows.append(("total", total_cl, total_cd, total_cdp, total_cm))
-    rows = _apply_total_cm_constancy(rows)
-    return rows, {"mode": "independent_legacy", "chord_weights": w}
+    return rows, {"mode": "independent_legacy"}
 
 
 def _run_alpha_coupled(alpha_deg: float, element_paths: List[pathlib.Path]):
@@ -183,7 +138,6 @@ def _run_alpha_coupled(alpha_deg: float, element_paths: List[pathlib.Path]):
 
     # 2) Coupled shared Euler solve for force interaction
     geom = load_multielement_geometry(element_paths)
-    w = _element_chord_weights(geom)
     coupled = solve_multielement_forces(geom, alpha=math.radians(alpha_deg), minf=MACH)
 
     # 3) Relax Euler forces into BL force baseline; update drag with coupling-induced penalty
@@ -215,19 +169,16 @@ def _run_alpha_coupled(alpha_deg: float, element_paths: List[pathlib.Path]):
             }
         )
 
-        wi = w[eid]
-        rows.append((f"element_{eid}", cl * wi, cd * wi, cdp * wi, cm * wi))
-        total_cl += cl * wi
-        total_cd += cd * wi
-        total_cdp += cdp * wi
-        total_cm += cm * wi
+        rows.append((f"element_{eid}", cl, cd, cdp, cm))
+        total_cl += cl
+        total_cd += cd
+        total_cdp += cdp
+        total_cm += cm
 
     rows.append(("total", total_cl, total_cd, total_cdp, total_cm))
 
-    rows = _apply_total_cm_constancy(rows)
     diagnostics = {
         "mode": "coupled",
-        "chord_weights": w,
         "euler_diagnostics": coupled["diagnostics"] if coupled is not None else {},
         "coupling_history": history,
     }
@@ -262,7 +213,6 @@ def _run_alpha_phase_d_iterative(alpha_deg: float, element_paths: List[pathlib.P
 
     # Shared geometry for coupled target loads.
     geom = load_multielement_geometry(element_paths)
-    w = _element_chord_weights(geom)
 
     cl_curr = {eid: viscous_by_element[eid]["cl"] for eid in viscous_by_element}
     cm_curr = {eid: viscous_by_element[eid]["cm"] for eid in viscous_by_element}
@@ -326,15 +276,13 @@ def _run_alpha_phase_d_iterative(alpha_deg: float, element_paths: List[pathlib.P
         dcm = cm - v["cm"]
         cdp = max(0.0, v["cdp"] + COUPLED_DRAG_CL_GAIN * dcl * dcl + COUPLED_DRAG_CM_GAIN * abs(dcm))
         cd = v["cdf"] + cdp
-        wi = w[eid]
-        rows.append((f"element_{eid}", cl * wi, cd * wi, cdp * wi, cm * wi))
-        total_cl += cl * wi
-        total_cd += cd * wi
-        total_cdp += cdp * wi
-        total_cm += cm * wi
+        rows.append((f"element_{eid}", cl, cd, cdp, cm))
+        total_cl += cl
+        total_cd += cd
+        total_cdp += cdp
+        total_cm += cm
 
     rows.append(("total", total_cl, total_cd, total_cdp, total_cm))
-    rows = _apply_total_cm_constancy(rows)
     diagnostics = {
         "mode": "phase_d_iterative",
         "converged": converged,
@@ -342,7 +290,6 @@ def _run_alpha_phase_d_iterative(alpha_deg: float, element_paths: List[pathlib.P
         "tolerances": {"dCL": COUPLED_CL_TOL, "dCM": COUPLED_CM_TOL},
         "effective_relax_cap": PHASE_D_EFFECTIVE_RELAX_CAP,
         "effective_iter_limit": _phase_d_effective_iteration_limit(),
-        "chord_weights": w,
         "euler_diagnostics": coupled["diagnostics"] if coupled is not None else {},
         "coupling_history": history,
     }
