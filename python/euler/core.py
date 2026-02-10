@@ -44,6 +44,13 @@ class EulerInviscidCore:
             raise RuntimeError("Euler core requires single-element geometry paneling first")
         solve_surface_cp(ctx)
 
+        # Phase-3 loose viscous coupling hook: BL displacement feedback can
+        # softly reduce effective loading seen by the Euler surface solution.
+        disp = max(0.0, min(0.2, getattr(ctx, "EULER_BL_DISP", 0.0)))
+        load_relax = 1.0 - 0.6 * disp
+        for i in range(1, ctx.N + 1):
+            ctx.CPI[i] = ctx.CPI[i] * load_relax
+
     @staticmethod
     def update_force_coefficients(ctx):
         EulerInviscidCore.update_pressure_coefficients(ctx)

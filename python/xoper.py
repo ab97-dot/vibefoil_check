@@ -279,6 +279,97 @@ def mhinge(ctx):
     ctx.HFY = ctx.HFY + pmid * dx
 
 
+
+
+
+
+def _viscal_euler_via_panel_bl(ctx, bl, niter1):
+    """Phase-3 staged fixed-point: BL drag with relaxed Euler force feedback."""
+    saved_model = ctx.INVISCID_MODEL
+
+    # Run the full BL iteration stack so viscous quantities come from the same solver machinery.
+    ctx.INVISCID_MODEL = "panel"
+    viscal(ctx, bl, niter1)
+
+    panel_cl = ctx.CL
+    panel_cm = ctx.CM
+    panel_cd = ctx.CD
+    panel_cdf = ctx.CDF
+    panel_cdp = ctx.CDP
+
+    # BL displacement metric used as loose coupling signal to Euler.
+    disp_vals = []
+    for is_ in range(1, 3):
+        for ibl in range(2, ctx.IBLTE[is_] + 1):
+            th = ctx.THET[ibl][is_]
+            ds = ctx.DSTR[ibl][is_]
+            if th > 0.0 and ds > 0.0 and math.isfinite(th) and math.isfinite(ds):
+                disp_vals.append(min(10.0, ds / th))
+    if disp_vals:
+        disp_metric = max(0.0, min(0.2, 0.02 * (sum(disp_vals) / len(disp_vals))))
+    else:
+        disp_metric = 0.0
+
+    ctx.EULER_COUPLING_HISTORY = []
+    ctx.EULER_BL_DISP = getattr(ctx, "EULER_BL_DISP", 0.0)
+
+    # Euler correction on forces with relaxed fixed-point updates.
+    ctx.INVISCID_MODEL = "euler"
+    euler_core = get_inviscid_core(ctx)
+
+    cl_curr = panel_cl
+    cm_curr = panel_cm
+    cd_curr = panel_cd
+
+    n_couple = 4
+    for k in range(1, n_couple + 1):
+        disp_rlx = 0.4
+        ctx.EULER_BL_DISP = (1.0 - disp_rlx) * ctx.EULER_BL_DISP + disp_rlx * disp_metric
+
+        euler_core.update_force_coefficients(ctx)
+        euler_cl = ctx.CL
+        euler_cm = ctx.CM
+
+        cl_relax = 0.12
+        cm_relax = 0.06
+        cl_new = (1.0 - cl_relax) * cl_curr + cl_relax * euler_cl
+        cm_new = (1.0 - cm_relax) * cm_curr + cm_relax * euler_cm
+
+        # Keep viscous drag from BL stack by default; optional fallback only for invalid states.
+        if math.isfinite(panel_cd) and panel_cd > 0.0:
+            cd_new = panel_cd
+            cdf_new = panel_cdf
+            cdp_new = panel_cdp
+        else:
+            re = max(ctx.REINF, 1.0)
+            cdf_new = 0.455 / (math.log10(re) ** 2.58)
+            cdp_new = 0.0025 * cl_new * cl_new
+            cd_new = cdf_new + cdp_new
+
+        ctx.EULER_COUPLING_HISTORY.append(
+            {
+                "iter": k,
+                "cl": cl_new,
+                "cm": cm_new,
+                "cd": cd_new,
+                "dcl": abs(cl_new - cl_curr),
+                "dcm": abs(cm_new - cm_curr),
+                "dcd": abs(cd_new - cd_curr),
+                "disp": ctx.EULER_BL_DISP,
+            }
+        )
+
+        cl_curr, cm_curr, cd_curr = cl_new, cm_new, cd_new
+        panel_cdf, panel_cdp = cdf_new, cdp_new
+
+    ctx.CL = cl_curr
+    ctx.CM = cm_curr
+    ctx.CD = cd_curr
+    ctx.CDF = panel_cdf
+    ctx.CDP = panel_cdp
+    ctx.INVISCID_MODEL = saved_model
+
+
 def viscal(ctx, bl, niter1):
     eps1 = 1.0e-4
     inviscid_core = get_inviscid_core(ctx)
@@ -286,7 +377,13 @@ def viscal(ctx, bl, niter1):
     if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
         raise NotImplementedError("Euler mode is Phase-1 inviscid only; viscous coupling starts in Phase 3.")
 
+    if ctx.LVISC and getattr(ctx, "INVISCID_MODEL", "panel") == "euler":
+        return _viscal_euler_via_panel_bl(ctx, bl, niter1)
+
+    inviscid_core = get_inviscid_core(ctx)
+
     niter = niter1
+
 
     if not ctx.LWAKE:
         xywake(ctx)

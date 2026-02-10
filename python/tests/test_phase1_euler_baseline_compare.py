@@ -25,6 +25,9 @@ class TestPhase1EulerBaselineCompare(unittest.TestCase):
         print("\nNACA0012 comparison: Re=1e6 Mach=0.0")
         print("mode,regime,alpha_deg,CL,CD,CM")
 
+        panel_viscous = {}
+        euler_viscous = {}
+
         for alpha_deg in alphas:
             alfa = alpha_deg * math.pi / 180.0
 
@@ -59,13 +62,45 @@ class TestPhase1EulerBaselineCompare(unittest.TestCase):
                 viscal(ctx_pv, bl, 10)
             print(f"panel,viscous,{alpha_deg:.1f},{ctx_pv.CL:.6f},{ctx_pv.CD:.6f},{ctx_pv.CM:.6f}")
 
+            # Euler viscous (Phase 3 loose coupling)
+            ctx_ev = build_viscal_context(12, minf=minf, reinf=reinf, alfa_rad=alfa, quiet=True)
+            ctx_ev.INVISCID_MODEL = "euler"
+            cosa_ev = math.cos(ctx_ev.ALFA)
+            sina_ev = math.sin(ctx_ev.ALFA)
+            for i in range(1, ctx_ev.N + 1):
+                ctx_ev.GAM[i] = cosa_ev * ctx_ev.GAMU[i][1] + sina_ev * ctx_ev.GAMU[i][2]
+            bl_ev = XBlState()
+            blpini(bl_ev)
+            with contextlib.redirect_stdout(io.StringIO()):
+                viscal(ctx_ev, bl_ev, 10)
+            print(f"euler,viscous,{alpha_deg:.1f},{ctx_ev.CL:.6f},{ctx_ev.CD:.6f},{ctx_ev.CM:.6f}")
+
+            panel_viscous[alpha_deg] = (ctx_pv.CL, ctx_pv.CD, ctx_pv.CM)
+            euler_viscous[alpha_deg] = (ctx_ev.CL, ctx_ev.CD, ctx_ev.CM)
+
             # Core sanity constraints for requested report.
             self.assertEqual(ctx_pi.CD, 0.0)
             self.assertEqual(ctx_ei.CD, 0.0)
             self.assertGreater(ctx_pv.CD, 0.0)
+            self.assertGreater(ctx_ev.CD, 0.0)
             self.assertTrue(math.isfinite(ctx_pi.CL) and math.isfinite(ctx_pi.CM))
             self.assertTrue(math.isfinite(ctx_ei.CL) and math.isfinite(ctx_ei.CM))
             self.assertTrue(math.isfinite(ctx_pv.CL) and math.isfinite(ctx_pv.CM))
+            self.assertTrue(math.isfinite(ctx_ev.CL) and math.isfinite(ctx_ev.CM))
+
+        # Quantitative Phase-3 tolerance checks at requested alphas.
+        # These are intentionally loose and can be tightened in later phases.
+        for alpha_deg in alphas:
+            p_cl, p_cd, p_cm = panel_viscous[alpha_deg]
+            e_cl, e_cd, e_cm = euler_viscous[alpha_deg]
+
+            self.assertGreater(e_cd, 0.0)
+            self.assertLessEqual(abs(e_cl - p_cl), 0.08)
+            self.assertLessEqual(abs(e_cd - p_cd), 0.0015)
+            self.assertLessEqual(abs(e_cm - p_cm), 0.06)
+
+        self.assertGreaterEqual(panel_viscous[8.0][1], panel_viscous[4.0][1])
+        self.assertGreaterEqual(euler_viscous[8.0][1], euler_viscous[4.0][1])
 
 
 if __name__ == "__main__":
