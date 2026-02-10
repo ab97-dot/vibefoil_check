@@ -4,11 +4,12 @@ import io
 import math
 import pathlib
 import sys
-from typing import List
+from typing import Dict, List, Tuple
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from python.euler import load_multielement_geometry, solve_multielement_forces
 from python.run_viscous_sweep_euler_user import (  # reuse user-level utilities
     _patch_gauss_for_python_solver,
     build_viscal_context,
@@ -28,8 +29,22 @@ ELEMENT_DAT_PATHS: List[str] = [
 REYNOLDS = 1.0e6
 MACH = 0.0
 WAKLEN = 1.0
-NITER = 10
+NITER = 100
 VERBOSE = False
+
+# Phase-C rollout switch:
+# - "coupled": single relaxed blend toward shared multi-element Euler forces
+# - "phase_d_iterative": iterative relaxed blend with convergence controls and diagnostics
+# - "independent_legacy": previous behavior (solve each element independently and sum)
+MULTI_ELEMENT_MODE = "phase_d_iterative"
+
+# relaxed blending from BL forces to coupled Euler forces
+COUPLED_FORCE_RELAX = 0.12
+
+# Phase-D iterative coupling controls
+COUPLED_MAX_ITERS = 12
+COUPLED_CL_TOL = 5.0e-5
+COUPLED_CM_TOL = 5.0e-5
 
 # Option A: explicit list of alphas (deg)
 ALPHAS_DEG_LIST: List[float] = [4.0, 8.0]
@@ -80,6 +95,156 @@ def _run_element(alpha_deg: float, dat_path: pathlib.Path):
     return ctx
 
 
+def _run_alpha_legacy(alpha_deg: float, element_paths: List[pathlib.Path]):
+    rows = []
+    total_cl = 0.0
+    total_cd = 0.0
+    total_cdp = 0.0
+    total_cm = 0.0
+
+    for idx, dat_path in enumerate(element_paths, start=1):
+        ctx = _run_element(alpha_deg, dat_path)
+        cdp = ctx.CD - ctx.CDF
+        rows.append((f"element_{idx}", ctx.CL, ctx.CD, cdp, ctx.CM))
+        total_cl += ctx.CL
+        total_cd += ctx.CD
+        total_cdp += cdp
+        total_cm += ctx.CM
+
+    rows.append(("total", total_cl, total_cd, total_cdp, total_cm))
+    return rows, {"mode": "independent_legacy"}
+
+
+def _run_alpha_coupled(alpha_deg: float, element_paths: List[pathlib.Path]):
+    # 1) Run BL stacks independently to obtain viscous drag per element (authoritative CD/CDF/CDP)
+    viscous_by_element: Dict[int, Dict[str, float]] = {}
+    for idx, dat_path in enumerate(element_paths, start=1):
+        ctx = _run_element(alpha_deg, dat_path)
+        viscous_by_element[idx] = {
+            "cl": ctx.CL,
+            "cm": ctx.CM,
+            "cd": ctx.CD,
+            "cdf": ctx.CDF,
+            "cdp": ctx.CD - ctx.CDF,
+        }
+
+    # 2) Coupled shared Euler solve for force interaction
+    geom = load_multielement_geometry(element_paths)
+    coupled = solve_multielement_forces(geom, alpha=math.radians(alpha_deg), minf=MACH)
+
+    # 3) Relax Euler forces into BL force baseline; keep BL drag as authoritative
+    rows = []
+    total_cl = 0.0
+    total_cd = 0.0
+    total_cdp = 0.0
+    total_cm = 0.0
+    history = []
+
+    for elem in geom.elements:
+        eid = elem.element_id
+        v = viscous_by_element[eid]
+        e = coupled["elements"][eid]
+
+        cl = (1.0 - COUPLED_FORCE_RELAX) * v["cl"] + COUPLED_FORCE_RELAX * e["CL"]
+        cm = (1.0 - COUPLED_FORCE_RELAX) * v["cm"] + COUPLED_FORCE_RELAX * e["CM"]
+        cd = v["cd"]
+        cdp = v["cdp"]
+
+        history.append(
+            {
+                "element_id": eid,
+                "dCL": abs(cl - v["cl"]),
+                "dCM": abs(cm - v["cm"]),
+                "dCD": abs(cd - v["cd"]),
+            }
+        )
+
+        rows.append((f"element_{eid}", cl, cd, cdp, cm))
+        total_cl += cl
+        total_cd += cd
+        total_cdp += cdp
+        total_cm += cm
+
+    rows.append(("total", total_cl, total_cd, total_cdp, total_cm))
+
+    diagnostics = {
+        "mode": "coupled",
+        "euler_diagnostics": coupled["diagnostics"],
+        "coupling_history": history,
+    }
+    return rows, diagnostics
+
+
+def _run_alpha_phase_d_iterative(alpha_deg: float, element_paths: List[pathlib.Path]):
+    # Start from authoritative viscous quantities.
+    viscous_by_element: Dict[int, Dict[str, float]] = {}
+    for idx, dat_path in enumerate(element_paths, start=1):
+        ctx = _run_element(alpha_deg, dat_path)
+        viscous_by_element[idx] = {
+            "cl": ctx.CL,
+            "cm": ctx.CM,
+            "cd": ctx.CD,
+            "cdf": ctx.CDF,
+            "cdp": ctx.CD - ctx.CDF,
+        }
+
+    # Shared Euler target loads for element interference.
+    geom = load_multielement_geometry(element_paths)
+    coupled = solve_multielement_forces(geom, alpha=math.radians(alpha_deg), minf=MACH)
+
+    cl_curr = {eid: viscous_by_element[eid]["cl"] for eid in viscous_by_element}
+    cm_curr = {eid: viscous_by_element[eid]["cm"] for eid in viscous_by_element}
+
+    history = []
+    converged = False
+    for it in range(1, COUPLED_MAX_ITERS + 1):
+        max_dcl = 0.0
+        max_dcm = 0.0
+        for elem in geom.elements:
+            eid = elem.element_id
+            target = coupled["elements"][eid]
+            cl_new = (1.0 - COUPLED_FORCE_RELAX) * cl_curr[eid] + COUPLED_FORCE_RELAX * target["CL"]
+            cm_new = (1.0 - COUPLED_FORCE_RELAX) * cm_curr[eid] + COUPLED_FORCE_RELAX * target["CM"]
+            max_dcl = max(max_dcl, abs(cl_new - cl_curr[eid]))
+            max_dcm = max(max_dcm, abs(cm_new - cm_curr[eid]))
+            cl_curr[eid] = cl_new
+            cm_curr[eid] = cm_new
+
+        history.append({"iter": it, "max_dCL": max_dcl, "max_dCM": max_dcm})
+        if max_dcl <= COUPLED_CL_TOL and max_dcm <= COUPLED_CM_TOL:
+            converged = True
+            break
+
+    rows = []
+    total_cl = 0.0
+    total_cd = 0.0
+    total_cdp = 0.0
+    total_cm = 0.0
+    for elem in geom.elements:
+        eid = elem.element_id
+        v = viscous_by_element[eid]
+        cl = cl_curr[eid]
+        cm = cm_curr[eid]
+        cd = v["cd"]
+        cdp = v["cdp"]
+        rows.append((f"element_{eid}", cl, cd, cdp, cm))
+        total_cl += cl
+        total_cd += cd
+        total_cdp += cdp
+        total_cm += cm
+
+    rows.append(("total", total_cl, total_cd, total_cdp, total_cm))
+    diagnostics = {
+        "mode": "phase_d_iterative",
+        "converged": converged,
+        "iters": len(history),
+        "tolerances": {"dCL": COUPLED_CL_TOL, "dCM": COUPLED_CM_TOL},
+        "euler_diagnostics": coupled["diagnostics"],
+        "coupling_history": history,
+    }
+    return rows, diagnostics
+
+
 def main():
     _patch_gauss_for_python_solver()
 
@@ -88,22 +253,17 @@ def main():
 
     print("alpha_deg,element,CL,CD,CDp,CM")
     for alpha_deg in alphas_deg:
-        total_cl = 0.0
-        total_cd = 0.0
-        total_cdp = 0.0
-        total_cm = 0.0
+        if MULTI_ELEMENT_MODE == "independent_legacy":
+            rows, _diag = _run_alpha_legacy(alpha_deg, element_paths)
+        elif MULTI_ELEMENT_MODE == "coupled":
+            rows, _diag = _run_alpha_coupled(alpha_deg, element_paths)
+        elif MULTI_ELEMENT_MODE == "phase_d_iterative":
+            rows, _diag = _run_alpha_phase_d_iterative(alpha_deg, element_paths)
+        else:
+            raise ValueError(f"Unknown MULTI_ELEMENT_MODE: {MULTI_ELEMENT_MODE}")
 
-        for idx, dat_path in enumerate(element_paths, start=1):
-            ctx = _run_element(alpha_deg, dat_path)
-            cdp = ctx.CD - ctx.CDF
-            print(f"{alpha_deg:.6g},element_{idx},{ctx.CL:.6f},{ctx.CD:.6f},{cdp:.6f},{ctx.CM:.6f}")
-
-            total_cl += ctx.CL
-            total_cd += ctx.CD
-            total_cdp += cdp
-            total_cm += ctx.CM
-
-        print(f"{alpha_deg:.6g},total,{total_cl:.6f},{total_cd:.6f},{total_cdp:.6f},{total_cm:.6f}")
+        for element_name, cl, cd, cdp, cm in rows:
+            print(f"{alpha_deg:.6g},{element_name},{cl:.6f},{cd:.6f},{cdp:.6f},{cm:.6f}")
 
 
 if __name__ == "__main__":

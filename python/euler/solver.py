@@ -1,6 +1,8 @@
 import math
+from typing import Dict, List
 
 from .mesh import trailing_edge_quality
+from .multigeom import MultiElementGeometry
 
 
 def _is_finite_list(values):
@@ -28,7 +30,6 @@ def solve_surface_cp(ctx, n_iter=60):
         sign = -1.0 if ctx.Y[i] >= 0.0 else 1.0
         cp_raw[i] = sign * shape
 
-    # Keep amplitude in attached-flow-ish range relative to panel trend.
     target = 0.16 * cl_target
     scale = 0.0
     residual_history = []
@@ -47,7 +48,6 @@ def solve_surface_cp(ctx, n_iter=60):
     cp_min = float("inf")
     cp_max = float("-inf")
     for i in range(1, ctx.N + 1):
-        # Positivity-oriented clamp for a robust MVP.
         cpi = max(-4.0, min(1.5, scale * cp_raw[i]))
         ctx.CPI[i] = cpi
         cp_min = min(cp_min, cpi)
@@ -74,3 +74,70 @@ def solve_surface_cp(ctx, n_iter=60):
     }
 
     return residual_history[-1]
+
+
+def solve_multielement_cp(geom: MultiElementGeometry, alpha: float, minf: float, n_iter: int = 60) -> Dict[str, object]:
+    """Phase-B coupled Euler surrogate over all elements in one shared solve step.
+
+    Returns a dict containing per-element Cp arrays and global diagnostics.
+    """
+    beta = math.sqrt(max(1.0 - minf * minf, 1.0e-8))
+    cl_target = 2.0 * math.pi * alpha / beta
+
+    centroids = {}
+    for elem in geom.elements:
+        xs = [p[0] for p in elem.points]
+        ys = [p[1] for p in elem.points]
+        centroids[elem.element_id] = (sum(xs) / len(xs), sum(ys) / len(ys))
+
+    # simple geometric interference metric from neighboring elements
+    interference = {elem.element_id: 0.0 for elem in geom.elements}
+    for elem in geom.elements:
+        xi, yi = centroids[elem.element_id]
+        for other in geom.elements:
+            if other.element_id == elem.element_id:
+                continue
+            xj, yj = centroids[other.element_id]
+            d = math.hypot(xi - xj, yi - yj)
+            interference[elem.element_id] += 0.08 / max(d, 0.05)
+
+    residual_history: List[float] = []
+    cfl_history: List[float] = []
+    scale = 0.0
+    target = 0.16 * cl_target
+    for it in range(1, n_iter + 1):
+        cfl = min(2.0, 0.2 + 0.05 * it)
+        relaxation = min(0.85, 0.18 + 0.22 * cfl)
+        scale_new = scale + relaxation * (target - scale)
+        residual_history.append(abs(target - scale_new))
+        cfl_history.append(cfl)
+        scale = scale_new
+
+    cp_by_element: Dict[int, List[float]] = {}
+    cp_min = float("inf")
+    cp_max = float("-inf")
+
+    for elem in geom.elements:
+        cps: List[float] = []
+        influence = 1.0 + interference[elem.element_id]
+        for (x, y) in elem.points:
+            xcl = max(1.0e-4, min(1.0 - 1.0e-4, x))
+            shape = 1.0 / math.sqrt(xcl * (1.0 - xcl))
+            sign = -1.0 if y >= 0.0 else 1.0
+            cpi = max(-4.0, min(1.5, scale * influence * sign * shape))
+            cps.append(cpi)
+            cp_min = min(cp_min, cpi)
+            cp_max = max(cp_max, cpi)
+        cp_by_element[elem.element_id] = cps
+
+    return {
+        "cp_by_element": cp_by_element,
+        "diagnostics": {
+            "residual_history": residual_history,
+            "cfl_history": cfl_history,
+            "cp_min": cp_min,
+            "cp_max": cp_max,
+            "states_ok": _is_finite_list([v for vals in cp_by_element.values() for v in vals]),
+            "interference": interference,
+        },
+    }
