@@ -30,6 +30,7 @@ MACH = 0.0                  # Mach number (MINF)
 WAKLEN = 1.0                # Wake length parameter
 NITER = 10                  # VISCAL iterations per alpha
 VERBOSE = False             # True to print full solver logs
+INVISCID_MODEL = "panel"     # "panel" or "euler"
 
 # Option A: explicit list of alphas (deg)
 ALPHAS_DEG_LIST: List[float] = []  # e.g. [0, 2, 4, 6, 8, 10]
@@ -178,6 +179,7 @@ def build_viscal_context(
     ctx.VACCEL = 0.01
     ctx.XCMREF = 0.25
     ctx.YCMREF = 0.0
+    ctx.INVISCID_MODEL = INVISCID_MODEL
 
     ctx.ACRIT[1] = 9.0
     ctx.ACRIT[2] = 9.0
@@ -235,7 +237,7 @@ def main():
     naca_code = None if airfoil_dat_path is not None else parse_naca(NACA_CODE)
     alphas_deg = alphas_from_config()
 
-    print("alpha_deg,CL,CD,CDp,Cm")
+    print("alpha_deg,CL,CD,CDp,CM")
     for alpha_deg in alphas_deg:
         alfa = alpha_deg * math.pi / 180.0
         ctx = build_viscal_context(
