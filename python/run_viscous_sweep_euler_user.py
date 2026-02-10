@@ -10,22 +10,27 @@ from typing import List, Optional, Tuple
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from python.xbl import XFoilState
-from python.inviscid import get_inviscid_core
+import python.xbl as xbl_mod
+from python.xbl import XFoilState, XBlState, blpini
 from python.xfoil import comset, naca, pangen
 from python.xpanel import ggcalc
+from python.xoper import viscal
+from python.xsolve import gauss as gauss_base
 
 # -----------------------------------------------------------------------------
 # USER CONFIGURATION
 # Edit these values directly, then run:
-#   python python/run_inviscid_sweep.py
+#   python python/run_viscous_sweep_euler_user.py
 # -----------------------------------------------------------------------------
-NACA_CODE = "0012"          # 4- or 5-digit NACA code string, e.g. "0012" or "23012"
-AIRFOIL_DAT_PATH = ""       # Optional path to a Selig-format .dat file. If set, NACA_CODE is ignored.
-TE_THICKNESS_FRAC = 0.002   # Trailing-edge thickness fraction of chord for DAT airfoils (blunt TE target).
-MACH = 0.0                  # Mach number (MINF)
-VERBOSE = False             # True to print panel setup logs
-INVISCID_MODEL = "panel"     # "panel" or "euler"
+NACA_CODE = "0012"  # 4- or 5-digit NACA code string, e.g. "0012" or "23012"
+AIRFOIL_DAT_PATH = ""  # Optional path to a Selig-format .dat file. If set, NACA_CODE is ignored.
+TE_THICKNESS_FRAC = 0.0001  # Trailing-edge thickness fraction of chord for DAT airfoils.
+REYNOLDS = 1.0e6  # Reynolds number
+MACH = 0.0  # Mach number (MINF)
+WAKLEN = 1.0  # Wake length parameter
+NITER = 10  # VISCAL iterations per alpha
+VERBOSE = False  # True to print full solver logs
+INVISCID_MODEL = "euler"  # Euler viscous loose-coupled mode
 
 # Option A: explicit list of alphas (deg)
 ALPHAS_DEG_LIST: List[float] = []  # e.g. [0, 2, 4, 6, 8, 10]
@@ -34,6 +39,23 @@ ALPHAS_DEG_LIST: List[float] = []  # e.g. [0, 2, 4, 6, 8, 10]
 ALPHA_START_DEG = 0.0
 ALPHA_END_DEG = 10.0
 ALPHA_STEP_DEG = 1.0
+
+
+def _patch_gauss_for_python_solver():
+    def gauss1(nsiz, nn, z, r, nrhs):
+        rmat = [[0.0] * (nrhs + 1) for _ in range(nn + 1)]
+        for i in range(1, nn + 1):
+            rmat[i][1] = r[i]
+        gauss_base(nsiz, nn, z, rmat, nrhs)
+        for i in range(1, nn + 1):
+            r[i] = rmat[i][1]
+
+    xbl_mod.gauss = gauss1
+
+    for module_name in ("python.xbl", "xbl"):
+        module = sys.modules.get(module_name)
+        if module is not None:
+            module.gauss = gauss1
 
 
 def parse_selig_dat(dat_path: pathlib.Path) -> Tuple[str, List[Tuple[float, float]]]:
@@ -100,9 +122,7 @@ def load_airfoil_dat(ctx: XFoilState, dat_path: pathlib.Path, te_thickness_frac:
     coords = enforce_blunt_te(coords, te_thickness_frac)
 
     if len(coords) >= len(ctx.XB):
-        raise ValueError(
-            f"Too many points in {dat_path} ({len(coords)}); maximum supported is {len(ctx.XB) - 1}."
-        )
+        raise ValueError(f"Too many points in {dat_path} ({len(coords)}); maximum supported is {len(ctx.XB) - 1}.")
 
     ctx.NB = len(coords)
     ctx.NAME = name
@@ -120,10 +140,12 @@ def load_airfoil_dat(ctx: XFoilState, dat_path: pathlib.Path, te_thickness_frac:
     pangen(ctx, True)
 
 
-def build_inviscid_context(
+def build_viscal_context(
     ides: Optional[int],
     minf: float,
+    reinf: float,
     alfa_rad: float,
+    waklen: float = 1.0,
     quiet: bool = True,
     airfoil_dat_path: Optional[pathlib.Path] = None,
 ) -> XFoilState:
@@ -137,16 +159,25 @@ def build_inviscid_context(
     ctx.XPREF1 = 1.0
     ctx.XPREF2 = 1.0
 
+    ctx.WAKLEN = waklen
     ctx.ALFA = alfa_rad
     ctx.ADEG = alfa_rad / ctx.DTOR
     ctx.QINF = 1.0
     ctx.MINF = minf
     ctx.MINF1 = minf
+    ctx.REINF = reinf
+    ctx.REINF1 = reinf
     ctx.LALFA = True
-    ctx.LVISC = False
+    ctx.LVISC = True
+    ctx.VACCEL = 0.01
     ctx.XCMREF = 0.25
     ctx.YCMREF = 0.0
     ctx.INVISCID_MODEL = INVISCID_MODEL
+
+    ctx.ACRIT[1] = 9.0
+    ctx.ACRIT[2] = 9.0
+    ctx.XSTRIP[1] = 1.0
+    ctx.XSTRIP[2] = 1.0
 
     if quiet:
         with contextlib.redirect_stdout(io.StringIO()):
@@ -167,6 +198,9 @@ def build_inviscid_context(
             naca(ctx, ides)
         comset(ctx)
         ggcalc(ctx)
+
+    for i in range(1, ctx.N + 1):
+        ctx.GAM[i] = 1.0 if i <= ctx.N // 2 else -1.0
 
     return ctx
 
@@ -190,6 +224,8 @@ def alphas_from_config() -> List[float]:
 
 
 def main():
+    _patch_gauss_for_python_solver()
+
     airfoil_dat_path = pathlib.Path(AIRFOIL_DAT_PATH).expanduser() if AIRFOIL_DAT_PATH else None
     naca_code = None if airfoil_dat_path is not None else parse_naca(NACA_CODE)
     alphas_deg = alphas_from_config()
@@ -197,10 +233,12 @@ def main():
     print("alpha_deg,CL,CD,CDp,CM")
     for alpha_deg in alphas_deg:
         alfa = alpha_deg * math.pi / 180.0
-        ctx = build_inviscid_context(
+        ctx = build_viscal_context(
             naca_code,
             MACH,
+            REYNOLDS,
             alfa,
+            WAKLEN,
             quiet=not VERBOSE,
             airfoil_dat_path=airfoil_dat_path,
         )
@@ -210,11 +248,15 @@ def main():
         for i in range(1, ctx.N + 1):
             ctx.GAM[i] = cosa * ctx.GAMU[i][1] + sina * ctx.GAMU[i][2]
 
-        get_inviscid_core(ctx).update_force_coefficients(ctx)
-        cdp = ctx.CDP
-        ctx.CD = 0.0
-        ctx.CDF = 0.0
+        bl = XBlState()
+        blpini(bl)
+        if VERBOSE:
+            viscal(ctx, bl, NITER)
+        else:
+            with contextlib.redirect_stdout(io.StringIO()):
+                viscal(ctx, bl, NITER)
 
+        cdp = ctx.CD - ctx.CDF
         print(f"{alpha_deg:.6g},{ctx.CL:.6f},{ctx.CD:.6f},{cdp:.6f},{ctx.CM:.6f}")
 
 
