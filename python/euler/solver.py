@@ -90,16 +90,50 @@ def solve_multielement_cp(geom: MultiElementGeometry, alpha: float, minf: float,
         ys = [p[1] for p in elem.points]
         centroids[elem.element_id] = (sum(xs) / len(xs), sum(ys) / len(ys))
 
-    # simple geometric interference metric from neighboring elements
+    # Signed, geometry-aware interference metric from neighboring elements.
+    # Relative centroids are projected onto streamwise/cross-stream axes to avoid
+    # always-positive coupling that can systematically over-amplify loads.
+    ca = math.cos(alpha)
+    sa = math.sin(alpha)
     interference = {elem.element_id: 0.0 for elem in geom.elements}
+    pair_interference: Dict[int, List[Dict[str, float]]] = {elem.element_id: [] for elem in geom.elements}
+
     for elem in geom.elements:
         xi, yi = centroids[elem.element_id]
         for other in geom.elements:
             if other.element_id == elem.element_id:
                 continue
             xj, yj = centroids[other.element_id]
-            d = math.hypot(xi - xj, yi - yj)
-            interference[elem.element_id] += 0.08 / max(d, 0.05)
+            rx = xj - xi
+            ry = yj - yi
+
+            stream = rx * ca + ry * sa
+            cross = -rx * sa + ry * ca
+
+            # near-field weighting with streamwise decay and cross-gap scaling
+            w_stream = math.exp(-abs(stream) / 0.7)
+            w_cross = 1.0 / (abs(cross) + 0.10)
+
+            # signed influence from relative cross-stream position:
+            # element above tends to reduce upper-surface suction proxy of lower element,
+            # element below tends to increase it (and vice versa).
+            signed_dir = -math.tanh(2.5 * cross)
+            contrib = 0.045 * w_stream * w_cross * signed_dir
+            contrib = max(-0.18, min(0.18, contrib))
+
+            interference[elem.element_id] += contrib
+            pair_interference[elem.element_id].append(
+                {
+                    "other_id": float(other.element_id),
+                    "stream": stream,
+                    "cross": cross,
+                    "contrib": contrib,
+                }
+            )
+
+    # final element-wise bounds for robustness
+    for eid in interference:
+        interference[eid] = max(-0.25, min(0.25, interference[eid]))
 
     residual_history: List[float] = []
     cfl_history: List[float] = []
@@ -139,5 +173,6 @@ def solve_multielement_cp(geom: MultiElementGeometry, alpha: float, minf: float,
             "cp_max": cp_max,
             "states_ok": _is_finite_list([v for vals in cp_by_element.values() for v in vals]),
             "interference": interference,
+            "pair_interference": pair_interference,
         },
     }

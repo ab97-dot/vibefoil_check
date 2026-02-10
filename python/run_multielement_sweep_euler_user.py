@@ -27,7 +27,7 @@ ELEMENT_DAT_PATHS: List[str] = [
     "python/airfoils/s414_element2.dat",
 ]
 REYNOLDS = 1.0e6
-MACH = 0.0
+MACH = 0.1
 WAKLEN = 1.0
 NITER = 100
 VERBOSE = False
@@ -40,6 +40,8 @@ MULTI_ELEMENT_MODE = "phase_d_iterative"
 
 # relaxed blending from BL forces to coupled Euler forces
 COUPLED_FORCE_RELAX = 0.12
+# Cap total Phase-D blend strength so repeated iterations do not over-drive toward Euler surrogate
+PHASE_D_EFFECTIVE_RELAX_CAP = 0.25
 
 # Phase-D iterative coupling controls
 COUPLED_MAX_ITERS = 12
@@ -169,10 +171,23 @@ def _run_alpha_coupled(alpha_deg: float, element_paths: List[pathlib.Path]):
 
     diagnostics = {
         "mode": "coupled",
-        "euler_diagnostics": coupled["diagnostics"],
+        "euler_diagnostics": coupled["diagnostics"] if coupled is not None else {},
         "coupling_history": history,
     }
     return rows, diagnostics
+
+
+def _phase_d_effective_iteration_limit() -> int:
+    if COUPLED_MAX_ITERS <= 0:
+        return 0
+    if COUPLED_FORCE_RELAX <= 0.0:
+        return 0
+    cap = max(0.0, min(PHASE_D_EFFECTIVE_RELAX_CAP, 0.999999))
+    if cap <= 0.0:
+        return 0
+    # effective blend after k steps: 1 - (1-r)^k <= cap
+    k_cap = math.floor(math.log(1.0 - cap) / math.log(1.0 - COUPLED_FORCE_RELAX))
+    return max(1, min(COUPLED_MAX_ITERS, k_cap))
 
 
 def _run_alpha_phase_d_iterative(alpha_deg: float, element_paths: List[pathlib.Path]):
@@ -188,29 +203,53 @@ def _run_alpha_phase_d_iterative(alpha_deg: float, element_paths: List[pathlib.P
             "cdp": ctx.CD - ctx.CDF,
         }
 
-    # Shared Euler target loads for element interference.
+    # Shared geometry for coupled target loads.
     geom = load_multielement_geometry(element_paths)
-    coupled = solve_multielement_forces(geom, alpha=math.radians(alpha_deg), minf=MACH)
 
     cl_curr = {eid: viscous_by_element[eid]["cl"] for eid in viscous_by_element}
     cm_curr = {eid: viscous_by_element[eid]["cm"] for eid in viscous_by_element}
 
     history = []
     converged = False
-    for it in range(1, COUPLED_MAX_ITERS + 1):
+    coupled = None
+    alpha_rad = math.radians(alpha_deg)
+    for it in range(1, _phase_d_effective_iteration_limit() + 1):
+        # Recompute coupled Euler target every iteration (true fixed-point style outer loop).
+        coupled = solve_multielement_forces(geom, alpha=alpha_rad, minf=MACH)
+
         max_dcl = 0.0
         max_dcm = 0.0
+        max_target_dcl = 0.0
+        max_target_dcm = 0.0
+        euler_weight = min(1.0, PHASE_D_EFFECTIVE_RELAX_CAP)
+
         for elem in geom.elements:
             eid = elem.element_id
-            target = coupled["elements"][eid]
-            cl_new = (1.0 - COUPLED_FORCE_RELAX) * cl_curr[eid] + COUPLED_FORCE_RELAX * target["CL"]
-            cm_new = (1.0 - COUPLED_FORCE_RELAX) * cm_curr[eid] + COUPLED_FORCE_RELAX * target["CM"]
+            target_raw = coupled["elements"][eid]
+            # Blend Euler target with current iterate so the target can evolve with the outer loop.
+            target_cl = (1.0 - euler_weight) * cl_curr[eid] + euler_weight * target_raw["CL"]
+            target_cm = (1.0 - euler_weight) * cm_curr[eid] + euler_weight * target_raw["CM"]
+
+            cl_new = (1.0 - COUPLED_FORCE_RELAX) * cl_curr[eid] + COUPLED_FORCE_RELAX * target_cl
+            cm_new = (1.0 - COUPLED_FORCE_RELAX) * cm_curr[eid] + COUPLED_FORCE_RELAX * target_cm
+
             max_dcl = max(max_dcl, abs(cl_new - cl_curr[eid]))
             max_dcm = max(max_dcm, abs(cm_new - cm_curr[eid]))
+            max_target_dcl = max(max_target_dcl, abs(target_cl - cl_curr[eid]))
+            max_target_dcm = max(max_target_dcm, abs(target_cm - cm_curr[eid]))
+
             cl_curr[eid] = cl_new
             cm_curr[eid] = cm_new
 
-        history.append({"iter": it, "max_dCL": max_dcl, "max_dCM": max_dcm})
+        history.append(
+            {
+                "iter": it,
+                "max_dCL": max_dcl,
+                "max_dCM": max_dcm,
+                "max_target_dCL": max_target_dcl,
+                "max_target_dCM": max_target_dcm,
+            }
+        )
         if max_dcl <= COUPLED_CL_TOL and max_dcm <= COUPLED_CM_TOL:
             converged = True
             break
@@ -239,7 +278,9 @@ def _run_alpha_phase_d_iterative(alpha_deg: float, element_paths: List[pathlib.P
         "converged": converged,
         "iters": len(history),
         "tolerances": {"dCL": COUPLED_CL_TOL, "dCM": COUPLED_CM_TOL},
-        "euler_diagnostics": coupled["diagnostics"],
+        "effective_relax_cap": PHASE_D_EFFECTIVE_RELAX_CAP,
+        "effective_iter_limit": _phase_d_effective_iteration_limit(),
+        "euler_diagnostics": coupled["diagnostics"] if coupled is not None else {},
         "coupling_history": history,
     }
     return rows, diagnostics

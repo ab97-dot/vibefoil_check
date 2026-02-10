@@ -119,6 +119,7 @@ class TestRunMultielementSweepEulerUser(unittest.TestCase):
             "COUPLED_MAX_ITERS": multi.COUPLED_MAX_ITERS,
             "COUPLED_CL_TOL": multi.COUPLED_CL_TOL,
             "COUPLED_CM_TOL": multi.COUPLED_CM_TOL,
+            "PHASE_D_EFFECTIVE_RELAX_CAP": multi.PHASE_D_EFFECTIVE_RELAX_CAP,
         }
         try:
             multi.ELEMENT_DAT_PATHS = list(S414_ELEMENT_PATHS)
@@ -126,8 +127,9 @@ class TestRunMultielementSweepEulerUser(unittest.TestCase):
             multi.NITER = 6
             multi.VERBOSE = False
             multi.COUPLED_MAX_ITERS = 30
-            multi.COUPLED_CL_TOL = 1.0
-            multi.COUPLED_CM_TOL = 1.0
+            multi.COUPLED_CL_TOL = 0.0
+            multi.COUPLED_CM_TOL = 0.0
+            multi.PHASE_D_EFFECTIVE_RELAX_CAP = 0.25
 
             # legacy output
             multi.MULTI_ELEMENT_MODE = "independent_legacy"
@@ -136,10 +138,18 @@ class TestRunMultielementSweepEulerUser(unittest.TestCase):
             # phase-d direct helper to inspect convergence diagnostics
             multi._patch_gauss_for_python_solver()
             rows, diag = multi._run_alpha_phase_d_iterative(8.0, [pathlib.Path(p) for p in S414_ELEMENT_PATHS])
-            self.assertTrue(diag["converged"])
+            self.assertFalse(diag["converged"])
             self.assertGreaterEqual(diag["iters"], 1)
             self.assertLessEqual(diag["iters"], multi.COUPLED_MAX_ITERS)
+            self.assertLessEqual(diag["iters"], diag["effective_iter_limit"])
+            self.assertEqual(diag["iters"], diag["effective_iter_limit"])
+            self.assertEqual(diag["effective_relax_cap"], multi.PHASE_D_EFFECTIVE_RELAX_CAP)
             hist = diag["coupling_history"]
+            self.assertGreaterEqual(len(hist), 2)
+            self.assertGreater(hist[0]["max_target_dCL"], 0.0)
+            self.assertGreater(hist[0]["max_target_dCM"], 0.0)
+            self.assertNotEqual(hist[0]["max_target_dCL"], hist[-1]["max_target_dCL"])
+            self.assertNotEqual(hist[0]["max_target_dCM"], hist[-1]["max_target_dCM"])
             self.assertGreaterEqual(hist[0]["max_dCL"], hist[-1]["max_dCL"])
             self.assertGreaterEqual(hist[0]["max_dCM"], hist[-1]["max_dCM"])
             self.assertEqual(rows[-1][0], "total")
